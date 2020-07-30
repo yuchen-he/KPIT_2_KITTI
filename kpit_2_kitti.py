@@ -12,6 +12,7 @@ import numpy as np
 from decimal import Decimal
 from tqdm import tqdm
 import cv2
+import math
 
 
 def parse_arguments():
@@ -29,7 +30,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--resize_image", "-r",
-        default="True",
+        default="False",
         help="if or not to resize images and save them",
     )
     return parser.parse_args()
@@ -50,12 +51,16 @@ def resize_image(imgs, image_path, save_path):
         raise IOError('This path for saving resized images is not exist: {}'.format(save_path))
 
 def convert_type(kpit_type):
-    kpit_list = ['CAR', 'BUS', 'TRUCK', 'MOTORBIKE', 'PEDESTRIAN']
+    kpit_list = ['CAR', 'BUS', 'TRUCK', 'MOTORBIKE', 'PEDESTRIAN', 'TRUCK_2_AXEL', 'TRUCK_3_AXEL']
     if kpit_type == kpit_list[0]:
         kitti_type = 'Car'
     elif kpit_type == kpit_list[1]:
         kitti_type = 'Van'
     elif kpit_type == kpit_list[2]:
+        kitti_type = 'Truck'
+    elif kpit_type == kpit_list[5]:
+        kitti_type = 'Truck'
+    elif kpit_type == kpit_list[6]:
         kitti_type = 'Truck'
     elif kpit_type == kpit_list[3]:
         kitti_type = 'DontCare'
@@ -75,26 +80,35 @@ def convert_occl_label(kpit_occl):
         raise KeyError("KPIT_Occlusion_label is not defined!")
     return kitti_occl
 
-def cal_2d_box(vertices_2d):
+def cal_2d_box(tv_bbox_type, vertices):
     '''
     Calculate a fake 2D bbox from the annotated cuboid vertices on image
-    :param vertices_2d: {"x1": , "y1": , "x2": , "y2": ,..., "x4": ,"y4": }
+    :param vertices: {"x1": , "y1": , "x2": , "y2": ,..., "x4": ,"y4": } or {"x1": , "y1": , "x2": , "y2": ,..., "x8": ,"y8": } 
     :return: [x_min, y_min, x_max, y_max]
     '''
-    x_list = [vertices_2d['x1'], vertices_2d['x2'], vertices_2d['x3'], vertices_2d['x4']]
-    y_list = [vertices_2d['y1'], vertices_2d['y2'], vertices_2d['y3'], vertices_2d['y4']]
-    x_min = Decimal(min(x_list)).quantize(Decimal('0.00'))
-    x_max = Decimal(max(x_list)).quantize(Decimal('0.00'))
-    y_min = Decimal(min(y_list)).quantize(Decimal('0.00'))
-    y_max = Decimal(max(y_list)).quantize(Decimal('0.00'))
+    if tv_bbox_type == "2D_cuboid":
+        x_list = [vertices['x1'], vertices['x2'], vertices['x3'], vertices['x4']]
+        y_list = [vertices['y1'], vertices['y2'], vertices['y3'], vertices['y4']]
+        x_min = Decimal(min(x_list)).quantize(Decimal('0.00'))
+        x_max = Decimal(max(x_list)).quantize(Decimal('0.00'))
+        y_min = Decimal(min(y_list)).quantize(Decimal('0.00'))
+        y_max = Decimal(max(y_list)).quantize(Decimal('0.00'))
+    elif tv_bbox_type == "3D_cuboid":
+        x_list = [vertices['x1'], vertices['x2'], vertices['x3'], vertices['x4'], vertices['x5'], vertices['x6'], vertices['x7'], vertices['x8']]
+        y_list = [vertices['y1'], vertices['y2'], vertices['y3'], vertices['y4'], vertices['y5'], vertices['y6'], vertices['y7'], vertices['y8']]
+        x_min = Decimal(min(x_list)).quantize(Decimal('0.00'))
+        x_max = Decimal(max(x_list)).quantize(Decimal('0.00'))
+        y_min = Decimal(min(y_list)).quantize(Decimal('0.00'))
+        y_max = Decimal(max(y_list)).quantize(Decimal('0.00'))
+    else:
+        raise KeyError("No such cuboid type supported! {}".format(tv_bbox_type))
+
     box_2d = [x_min, y_min, x_max, y_max]
     return box_2d
 
 def cal_dim_loc(vertices_3d):
     '''
     Calculate the dimension of a vehicle from real 3D cuboid vertices.
-    :param vertices_3d: {"x1": , "y1": , "z1": ,..., "x4": ,"y4": ,"z4":}
-    :return: [h, w, l] in meters
     '''
     # since kpit has no real 3d points now, make fake points
     # front_left_top = np.array([vertices_3d['x1'], vertices_3d['y1'], vertices_3d['z1']])
@@ -106,11 +120,9 @@ def cal_dim_loc(vertices_3d):
     # height = np.linalg.norm(front_left_top - front_left_bottom)
     # length = np.linalg.norm(front_left_top - back_left_top)
 
-    # also need to convert from np.array to float32
-    # dimension_3d = [height, width, length]
-    # location_3d = (front_left_top + back_right_bottom) / 2
-    dimension_3d = [2.23, 3.35, 5.15]
-    location_3d = [1.52, 3.55, 30.55]
+    dimension_3d = [round(vertices_3d['height'] ,2), round(vertices_3d['width'] ,2), round(vertices_3d['length'] ,2)]
+    # kpit_x = kitti_z, kpit_y = -kitti_x, kpit_z = kitti_y
+    location_3d = [-round(vertices_3d['centroidY'] ,2), round(vertices_3d['centroidZ']+0.5 ,2), round(vertices_3d['centroidX'] ,2)]
     return dimension_3d, location_3d
 
 def cal_rotation(vertices_3d):
@@ -120,7 +132,8 @@ def cal_rotation(vertices_3d):
     :return: alpha, rotation_y (in KITTI format)
     '''
     tv_alpha = -10
-    tv_rotation = 0
+    tv_rotation = -math.radians(90 - math.degrees(-vertices_3d['rot1']))
+    tv_rotation = round(tv_rotation, 2)
 
     return tv_alpha, tv_rotation
 
@@ -198,12 +211,12 @@ def main():
 
 
             # convert labels
-            label_save_dir = os.path.join(save_path, 'labels')
+            label_save_dir = os.path.join(save_path, 'label')
             calib_save_dir = os.path.join(save_path, 'calib')
             if not os.path.isdir(label_save_dir):
-                os.mkdir(label_save_dir)
+                os.makedirs(label_save_dir)
             if not os.path.isdir(calib_save_dir):
-                os.mkdir(calib_save_dir)
+                os.makedirs(calib_save_dir)
 
             with open(label_file_path, 'r') as label:
                 label_per_scenario = json.load(label)
@@ -221,12 +234,14 @@ def main():
                         # tv_id = idx['id']
                         tv_type = convert_type(idx['class'])
                         tv_occluded = convert_occl_label(idx['occlusion'])
+                        tv_bbox_type = idx['cuboid_type']
+                        # 2d_cuboid should be skipped (kitti also can not detect it)
+                        if tv_bbox_type == '2D_cuboid':
+                            continue
 
-                        # //todo: convert 2d & 3d coordinate to fit (1248, 384) image
-                        tv_2d_box = cal_2d_box(idx['box_coords'])
-                        # //todo: The followings are not annotated yet
-                        tv_dimensions, tv_location = cal_dim_loc(idx['box_coords'])  # need to be 3d_box_coords
-                        tv_alpha, tv_rotation = cal_rotation(idx['box_coords'])  # need to be 3d_box_coords
+                        tv_2d_box = cal_2d_box(tv_bbox_type, idx['image_plane_coords'])
+                        tv_dimensions, tv_location = cal_dim_loc(idx['real_plane_coords']) 
+                        tv_alpha, tv_rotation = cal_rotation(idx['real_plane_coords'])
 
                         id_label = [tv_type, tv_occluded, tv_2d_box, tv_dimensions,
                                     tv_location, tv_alpha, tv_rotation]
@@ -244,7 +259,7 @@ def main():
                     # step3: save calibration files per image
                     calib_save_path = os.path.join(calib_save_dir, '{}.txt'.format(img_name))
                     with open(calib_save_path, 'w') as outfile_calib:
-                        for line in open(os.path.join(save_path, '../../fov30_calib_sample.txt'), 'r'):
+                        for line in open('./fov30_calib_sample_kpit.txt', 'r'):
                             # pdb.set_trace()
                             outfile_calib.write(line)
 
